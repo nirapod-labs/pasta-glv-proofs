@@ -1,0 +1,3 @@
+# The toolchain pasta_curves pins (its rust-toolchain.toml at e3c0f0246f).
+[toolchain]
+channel = "1.85.0"

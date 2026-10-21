@@ -1,0 +1,23 @@
+[package]
+name = "glv-difftest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Debug builds keep pasta's default checks (debug assertions and overflow checks on); release
+# builds turn both off explicitly, so the silent u128 wrap near 2^128 shows up.
+[profile.release]
+debug-assertions = false
+overflow-checks = false
+
+# The other two combinations of the checks: release with overflow checks on and debug assertions
+# off, and debug assertions without overflow checks.
+[profile.release-ovf]
+inherits = "release"
+overflow-checks = true
+
+[profile.debug-noovf]
+inherits = "dev"
+overflow-checks = false
+
+[workspace]

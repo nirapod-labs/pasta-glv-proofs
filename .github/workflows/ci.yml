@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the proofs and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The hashed files match FROZEN.sha256
+        run: sha256sum --strict -c FROZEN.sha256
+      # Installs the toolchain from lean-toolchain and fetches the Mathlib cache; the next step
+      # builds.
+      - uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1.5.0
+        with:
+          build: "false"
+      - name: Build the library and Tests/
+        run: lake build
+      # Every `#print axioms` in Tests/ lists only the three standard axioms, and the two that
+      # cover every statement (Final.all and FinalA.all) are among them.
+      - name: Only standard axioms
+        run: |
+          for f in Tests/*.lean; do lake env lean "$f"; done > tests.txt
+          grep "depends on axioms" tests.txt
+          grep -q "'PastaCurves.Glv.Final.all' depends on axioms" tests.txt
+          grep -q "'PastaCurves.Glv.FinalA.all' depends on axioms" tests.txt
+          if sed -n 's/.*depends on axioms: \[\(.*\)\]/\1/p' tests.txt | tr ',' '\n' | tr -d ' ' |
+              grep -vxE 'propext|Classical\.choice|Quot\.sound'; then
+            echo "non-standard axiom found"; exit 1
+          fi
+      - name: Edge cases
+        run: lake exe edgecases
+
+  difftest:
+    name: Differential test of wnaf_digits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The copy in difftest/src/main.rs must be src/glv.rs lines 392-419 at the pin, byte for
+      # byte.
+      - name: The copy of wnaf_digits is current
+        run: |
+          git clone -q --filter=blob:none --no-checkout https://github.com/zcash/pasta_curves "$RUNNER_TEMP/pasta"
+          git -C "$RUNNER_TEMP/pasta" show e3c0f0246f56d351f1a94ff0a74c8d201dbf87d9:src/glv.rs |
+            sed -n 392,419p > "$RUNNER_TEMP/pinned.rs"
+          sed -n '/^\/\/ BEGIN VERBATIM src\/glv.rs 392-419$/,/^\/\/ END VERBATIM$/p' difftest/src/main.rs |
+            sed '1d;$d' | cmp - "$RUNNER_TEMP/pinned.rs"
+      - uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1.5.0
+        with:
+          build: "false"
+      # The loop in difftest/README.md; cargo installs the toolchain rust-toolchain.toml names.
+      - name: Rust and the model agree in all four profiles
+        working-directory: difftest
+        run: |
+          mkdir -p out
+          lake -d .. build difftest
+          cargo run -q -- inputs > out/inputs.txt
+          for profile in dev release release-ovf debug-noovf; do
+            mode=${profile/dev/debug}
+            cargo run -q --profile $profile -- run out/inputs.txt > out/rust-$mode.txt
+            lake -d .. exe difftest $mode "$PWD/out/inputs.txt" > out/lean-$mode.txt
+            cmp out/rust-$mode.txt out/lean-$mode.txt
+            echo "$mode: identical, $(grep -c ' panic$' out/rust-$mode.txt) panicking lines"
+          done

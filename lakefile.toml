@@ -1,0 +1,37 @@
+name = "PastaGlvProofs"
+defaultTargets = ["PastaGlv", "Tests"]
+
+[leanOptions]
+autoImplicit = false
+
+# The same Mathlib and Aeneas as pasta_curves' own Lean package at e3c0f0246f.
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4"
+rev = "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+
+[[require]]
+name = "aeneas"
+git = "https://github.com/AeneasVerif/aeneas"
+rev = "b86120db3183b0107eb5f2637b11c424cd06ef1c"
+subDir = "backends/lean"
+
+# The model, the statements, the Aeneas translation of wnaf_digits and the proofs.
+[[lean_lib]]
+name = "PastaGlv"
+globs = ["PastaCurves.Glv.+"]
+
+[[lean_lib]]
+name = "Tests"
+globs = ["Tests.+"]
+
+# The edge cases, printed: `lake exe edgecases`.
+[[lean_exe]]
+name = "edgecases"
+root = "Tests.EdgeCases"
+
+# The Lean side of the differential test: `lake exe difftest MODE FILE`.
+[[lean_exe]]
+name = "difftest"
+srcDir = "difftest"
+root = "Difftest"

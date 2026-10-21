@@ -1,0 +1,395 @@
+--- a/src/glv.rs
++++ b/src/glv.rs
+@@ -80,12 +80,7 @@
+     /// scalar, use [`Table`] / [`Decomposed`] directly to reuse the
+     /// precomputation.
+     fn mul_glv(&self, k: &Self::ScalarExt) -> Self {
+-        if bool::from(self.is_identity()) {
+-            // k*O = O. Identity tables work (see [`Table::batch`]), but
+-            // building one still costs a field inversion; short-circuit.
+-            return Self::identity();
+-        }
+-        Table::new(self).mul(k)
++        mul_glv_with(self, k)
+     }
+ }
+ 
+@@ -241,8 +236,186 @@
+     // k2 = c1*V1B_NEG - c2*V2B   (v1.b = -V1B_NEG, v2.b = +V2B)
+     let k2 = sub256(mul_u128(c1, C::V1B_NEG), mul_u128(c2, C::V2B));
+     (signed_halves(k1), signed_halves(k2))
++}
++
++/// The point operations that the ladder runs, over a curve's projective
++/// points (`Self`) and the affine points of its tables ([`LadderOps::Affine`]).
++///
++/// The ladder ([`add_digit`]) and the entry points ([`mul_glv_with`] and the
++/// other `_with` functions) are written once over this trait and [`GlvOps`],
++/// rather than over [`GlvParams`] and the curve traits that it extends, so that
++/// Aeneas can translate them; every [`GlvParams`] curve implements both traits
++/// with its own operations. ([`Table::batch`] keeps its own body: Aeneas'
++/// library does not model its `map` and `collect`.) As
++/// `crate::inversion::InvertBlocks` does for the inversion, this trait mirrors
++/// the Lean record of the same name.
++trait LadderOps: Sized {
++    /// The affine form of a point.
++    type Affine: Copy;
++
++    /// `C::identity()`.
++    fn identity() -> Self;
++
++    /// `p.double()`.
++    fn double(p: &Self) -> Self;
++
++    /// `*acc += a` for an affine `a` (a mixed addition).
++    fn add_mixed(acc: &mut Self, a: Self::Affine);
++
++    /// `-a` for an affine `a`.
++    fn neg_affine(a: Self::Affine) -> Self::Affine;
++}
++
++/// The curve operations that the rest of the GLV path runs, beside those of
++/// [`LadderOps`]: those of the table builders and of [`GlvParams::mul_glv`]
++/// (the Lean record `CurveOps`), and the decomposition of a scalar. It also
++/// builds and reads a [`Table`] and a [`Decomposed`], so that each function
++/// written over it keeps the signature, and the machine code, of the method
++/// that calls it.
++trait GlvOps: LadderOps + Copy {
++    /// The scalar field, `C::ScalarExt`.
++    type Scalar;
++
++    /// [`Table`].
++    type Table;
++
++    /// [`Decomposed`].
++    type Decomposed;
++
++    /// `bool::from(p.is_identity())`.
++    fn is_identity(p: &Self) -> bool;
++
++    /// `p + q`.
++    fn add(p: Self, q: Self) -> Self;
++
++    /// `p.endo()` (see [`CurveExt::endo`]).
++    fn endo(p: &Self) -> Self;
++
++    /// `C::AffineExt::identity()`.
++    fn affine_identity() -> Self::Affine;
++
++    /// `C::batch_normalize(p, q)`.
++    fn batch_normalize(p: &[Self], q: &mut [Self::Affine]);
++
++    /// `decompose::<C>(k)` (see [`decompose`]).
++    fn decompose(k: &Self::Scalar) -> ((bool, u128), (bool, u128));
++
++    /// The table with the halves `t1` and `t2`.
++    fn table(t1: [Self::Affine; 4], t2: [Self::Affine; 4]) -> Self::Table;
++
++    /// The halves `(t1, t2)` of the table `t`.
++    fn halves(t: &Self::Table) -> (&[Self::Affine; 4], &[Self::Affine; 4]);
++
++    /// The [`Decomposed`] with these fields.
++    fn decomposed(
++        digits1: [i8; MAX_WNAF_DIGITS],
++        digits2: [i8; MAX_WNAF_DIGITS],
++        len: usize,
++    ) -> Self::Decomposed;
++
++    /// The fields `(digits1, digits2, len)` of `k`.
++    fn digits(k: &Self::Decomposed) -> (&[i8; MAX_WNAF_DIGITS], &[i8; MAX_WNAF_DIGITS], usize);
++}
++
++impl<C: GlvParams> LadderOps for C {
++    type Affine = C::AffineExt;
++
++    #[inline]
++    fn identity() -> Self {
++        C::identity()
++    }
++
++    #[inline]
++    fn double(p: &Self) -> Self {
++        p.double()
++    }
++
++    #[inline]
++    fn add_mixed(acc: &mut Self, a: Self::Affine) {
++        *acc += a;
++    }
++
++    #[inline]
++    fn neg_affine(a: Self::Affine) -> Self::Affine {
++        -a
++    }
++}
++
++impl<C: GlvParams> GlvOps for C {
++    type Scalar = C::ScalarExt;
++    type Table = Table<C>;
++    type Decomposed = Decomposed<C>;
++
++    #[inline]
++    fn is_identity(p: &Self) -> bool {
++        bool::from(p.is_identity())
++    }
++
++    #[inline]
++    fn add(p: Self, q: Self) -> Self {
++        p + q
++    }
++
++    #[inline]
++    fn endo(p: &Self) -> Self {
++        p.endo()
++    }
++
++    #[inline]
++    fn affine_identity() -> Self::Affine {
++        C::AffineExt::identity()
++    }
++
++    #[inline]
++    fn batch_normalize(p: &[Self], q: &mut [Self::Affine]) {
++        C::batch_normalize(p, q);
++    }
++
++    #[inline]
++    fn decompose(k: &Self::Scalar) -> ((bool, u128), (bool, u128)) {
++        decompose::<C>(k)
++    }
++
++    #[inline]
++    fn table(t1: [Self::Affine; 4], t2: [Self::Affine; 4]) -> Self::Table {
++        Table { t1, t2 }
++    }
++
++    #[inline]
++    fn halves(t: &Self::Table) -> (&[Self::Affine; 4], &[Self::Affine; 4]) {
++        (&t.t1, &t.t2)
++    }
++
++    #[inline]
++    fn decomposed(
++        digits1: [i8; MAX_WNAF_DIGITS],
++        digits2: [i8; MAX_WNAF_DIGITS],
++        len: usize,
++    ) -> Self::Decomposed {
++        Decomposed {
++            digits1,
++            digits2,
++            len,
++            _curve: core::marker::PhantomData,
++        }
++    }
++
++    #[inline]
++    fn digits(k: &Self::Decomposed) -> (&[i8; MAX_WNAF_DIGITS], &[i8; MAX_WNAF_DIGITS], usize) {
++        (&k.digits1, &k.digits2, k.len)
++    }
+ }
+ 
++/// [`GlvParams::mul_glv`] over the curve operations `G`.
++fn mul_glv_with<G: GlvOps>(p: &G, k: &G::Scalar) -> G {
++    if G::is_identity(p) {
++        // k*O = O. Identity tables work (see [`Table::batch`]), but
++        // building one still costs a field inversion; short-circuit.
++        return G::identity();
++    }
++    table_mul_with::<G>(&table_new_with(p), k)
++}
++
+ /// The GLV window for one base point: the odd multiples `{1, 3, 5, 7} * P` and
+ /// `{1, 3, 5, 7} * phi(P)` in affine coordinates. 512 bytes per table.
+ ///
+@@ -260,10 +433,7 @@
+     /// Builds the window for a single point (with no heap allocation, but
+     /// one field inversion; amortize that with [`Table::batch`]).
+     pub fn new(p: &C) -> Self {
+-        let proj = Self::window_proj(p);
+-        let mut affine = [C::AffineExt::identity(); 8];
+-        C::batch_normalize(&proj, &mut affine);
+-        Self::from_window(&affine)
++        table_new_with(p)
+     }
+ 
+     /// Builds [`Table`]s for a batch of points with one shared
+@@ -280,39 +450,14 @@
+         }
+         let mut proj = Vec::with_capacity(n * 8);
+         for p in points {
+-            proj.extend_from_slice(&Self::window_proj(p));
++            proj.extend_from_slice(&window_proj(p));
+         }
+         // One inversion for the whole batch.
+         let mut affine = alloc::vec![C::AffineExt::identity(); n * 8];
+         C::batch_normalize(&proj, &mut affine);
+-        affine.chunks_exact(8).map(Self::from_window).collect()
++        affine.chunks_exact(8).map(from_window::<C>).collect()
+     }
+ 
+-    /// The eight projective window entries for one point:
+-    /// `[1P, 3P, 5P, 7P, 1phi(P), 3phi(P), 5phi(P), 7phi(P)]`. Projective
+-    /// group operations only (cheap additions and endomorphism, no
+-    /// inversions); the endomorphism multiples are taken via
+-    /// [`CurveExt::endo`] so they ride along in the caller's normalization.
+-    fn window_proj(p: &C) -> [C; 8] {
+-        let two_p = p.double();
+-        let mut w = [*p; 8];
+-        for i in 1..4 {
+-            w[i] = w[i - 1] + two_p;
+-        }
+-        for i in 0..4 {
+-            w[i + 4] = w[i].endo();
+-        }
+-        w
+-    }
+-
+-    /// Assembles a table from one normalized 8-entry window.
+-    fn from_window(w: &[C::AffineExt]) -> Self {
+-        Table {
+-            t1: w[..4].try_into().expect("four P multiples"),
+-            t2: w[4..8].try_into().expect("four phi(P) multiples"),
+-        }
+-    }
+-
+     /// The base point P (= t1\[0\]) back as a projective point.
+     #[cfg(test)]
+     fn point(&self) -> C {
+@@ -324,39 +469,88 @@
+     /// When one scalar meets many tables, decompose once with
+     /// [`Decomposed::new`] and use [`Table::mul_decomposed`] instead.
+     pub fn mul(&self, k: &C::ScalarExt) -> C {
+-        self.mul_decomposed(&Decomposed::new(k))
++        table_mul_with::<C>(self, k)
+     }
+ 
+     /// `k * P` for the P encoded by this table, via the Straus
+     /// shared-doubling ladder over the GLV split. Identical to `P * k`
+     /// (tested).
+     pub fn mul_decomposed(&self, k: &Decomposed<C>) -> C {
+-        let mut acc = C::identity();
+-        for i in (0..k.len).rev() {
+-            // `acc` is still the identity on the first iteration; skip the
+-            // wasted doubling.
+-            if i + 1 < k.len {
+-                acc = acc.double();
+-            }
+-            Self::add_digit(&mut acc, &self.t1, k.digits1[i]);
+-            Self::add_digit(&mut acc, &self.t2, k.digits2[i]);
+-        }
+-        acc
++        mul_decomposed_with::<C>(self, k)
+     }
++}
+ 
+-    /// Adds `d * B` to `acc`, where `table` holds `{1, 3, 5, 7} * B` and `d`
+-    /// is a signed odd wNAF digit (zero adds nothing).
+-    fn add_digit(acc: &mut C, table: &[C::AffineExt; 4], d: i8) {
+-        if d != 0 {
+-            let mut a = table[(d.unsigned_abs() / 2) as usize];
+-            if d < 0 {
+-                a = -a;
+-            }
+-            *acc += a;
++/// [`Table::new`] over the curve operations `G`.
++fn table_new_with<G: GlvOps>(p: &G) -> G::Table {
++    let proj = window_proj(p);
++    let mut affine = [G::affine_identity(); 8];
++    G::batch_normalize(&proj, &mut affine);
++    from_window::<G>(&affine)
++}
++
++/// The eight projective window entries for one point:
++/// `[1P, 3P, 5P, 7P, 1phi(P), 3phi(P), 5phi(P), 7phi(P)]`. Projective
++/// group operations only (cheap additions and endomorphism, no
++/// inversions); the endomorphism multiples are taken via
++/// [`CurveExt::endo`] so they ride along in the caller's normalization.
++fn window_proj<G: GlvOps>(p: &G) -> [G; 8] {
++    let two_p = G::double(p);
++    let mut w = [*p; 8];
++    for i in 1..4 {
++        w[i] = G::add(w[i - 1], two_p);
++    }
++    for i in 0..4 {
++        w[i + 4] = G::endo(&w[i]);
++    }
++    w
++}
++
++/// Assembles a table from one normalized 8-entry window. (`ok().unwrap()`
++/// rather than `expect`, since Aeneas' library proves the length of every
++/// string with `decide +native` and reads `Debug` through an axiom.)
++fn from_window<G: GlvOps>(w: &[G::Affine]) -> G::Table {
++    G::table(
++        w[..4].try_into().ok().unwrap(),
++        w[4..8].try_into().ok().unwrap(),
++    )
++}
++
++/// [`Table::mul`] over the curve operations `G`. Inlined into its callers, as
++/// the method was.
++#[inline]
++fn table_mul_with<G: GlvOps>(t: &G::Table, k: &G::Scalar) -> G {
++    mul_decomposed_with::<G>(t, &decomposed_new_with::<G>(k))
++}
++
++/// [`Table::mul_decomposed`] over the curve operations `G`.
++fn mul_decomposed_with<G: GlvOps>(t: &G::Table, k: &G::Decomposed) -> G {
++    let mut acc = G::identity();
++    let (digits1, digits2, len) = G::digits(k);
++    for i in (0..len).rev() {
++        // `acc` is still the identity on the first iteration; skip the
++        // wasted doubling.
++        if i + 1 < len {
++            acc = G::double(&acc);
+         }
++        let (t1, t2) = G::halves(t);
++        add_digit(&mut acc, t1, digits1[i]);
++        add_digit(&mut acc, t2, digits2[i]);
+     }
++    acc
+ }
+ 
++/// Adds `d * B` to `acc`, where `table` holds `{1, 3, 5, 7} * B` and `d`
++/// is a signed odd wNAF digit (zero adds nothing).
++fn add_digit<L: LadderOps>(acc: &mut L, table: &[L::Affine; 4], d: i8) {
++    if d != 0 {
++        let mut a = table[(d.unsigned_abs() / 2) as usize];
++        if d < 0 {
++            a = L::neg_affine(a);
++        }
++        L::add_mixed(acc, a);
++    }
++}
++
+ /// A scalar in GLV-decomposed, wNAF-recoded form, ready for
+ /// [`Table::mul_decomposed`].
+ ///
+@@ -377,18 +571,18 @@
+     /// Decomposes `k` and recodes both halves as width-4 wNAF digits, with
+     /// each half's sign folded into its digits.
+     pub fn new(k: &C::ScalarExt) -> Self {
+-        let ((neg1, a1), (neg2, a2)) = decompose::<C>(k);
+-        let (digits1, len1) = wnaf_digits(a1, neg1);
+-        let (digits2, len2) = wnaf_digits(a2, neg2);
+-        Decomposed {
+-            digits1,
+-            digits2,
+-            len: len1.max(len2),
+-            _curve: core::marker::PhantomData,
+-        }
++        decomposed_new_with::<C>(k)
+     }
+ }
+ 
++/// [`Decomposed::new`] over the curve operations `G`.
++fn decomposed_new_with<G: GlvOps>(k: &G::Scalar) -> G::Decomposed {
++    let ((neg1, a1), (neg2, a2)) = G::decompose(k);
++    let (digits1, len1) = wnaf_digits(a1, neg1);
++    let (digits2, len2) = wnaf_digits(a2, neg2);
++    G::decomposed(digits1, digits2, len1.max(len2))
++}
++
+ /// Upper bound on the number of width-4 wNAF digits of a decomposition half:
+ /// an n-bit magnitude yields at most n + 1 digits, and [`decompose`] bounds
+ /// the halves below `2^127`.
